@@ -1,4 +1,4 @@
-# Open Wegram Bot (OWB)
+# AG ChatBridge Bot
 
 一个基于 Cloudflare Workers 的 Telegram 双向私聊机器人，支持：
 - 📩 用户与管理员的私聊转发
@@ -80,3 +80,6 @@ https://你的域名/public/install
 - 部署后请勿公开包含敏感信息的变量或配置文件（如 `wrangler.toml`）。
 - 群组消息（ID 以 `-100` 开头）会被自动忽略。
 - Turnstile 验证一旦启用，新用户需在 5 分钟内点击一次性链接完成验证，当天有效。
+
+本项目是基于 Open Wegram Bot (OWB) 开发
+原始项目使用 GNU General Public License v3.0 授权

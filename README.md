@@ -44,8 +44,8 @@
 - 进入 Worker **Triggers** → **Custom Domains** → **Add Custom Domain**。
 - 输入 `verify.你的域名.com`，并按提示完成 DNS 配置。
 - 同时确保在 Cloudflare Turnstile 设置中，也将这个域名加入允许列表。
-
-## 注意事项
+- 
+注意事项:
 - 如果你使用的是worker所提供的默认域名，此操作仅需要在Cloudflare Turnstile设置将默认域名加入允许列表即可
 
 ### 6. 安装 Webhook

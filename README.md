@@ -22,7 +22,7 @@
 3. 点击 **部署**。
 
 ### 3. 配置环境变量
-进入 Worker 的 **Settings → Variables**，添加以下**纯文本**变量：
+进入 Worker 的 **Settings → Variables**，添加以下变量：
 
 | 变量名 | 必填 | 说明 |
 |--------|------|------|
@@ -32,34 +32,35 @@
 | `SECRET_TOKEN` | 可选 | Webhook 安全验证令牌（建议设置） |
 | `TURNSTILE_SITE_KEY` | 可选 | Turnstile 站点密钥 (不填则关闭验证) |
 | `TURNSTILE_SECRET_KEY` | 可选 | Turnstile 密钥 (不填则关闭验证) |
-| `VERIFY_DOMAIN` | 可选 | 用于展示验证页面的自定义域名（例如 `verify.你的域名.com`），不填则使用 Worker 默认域名( `*.worker.dev`) |
+| `VERIFY_DOMAIN` | 可选 | 用于展示验证页面的自定义域名（例如 `verify.你的域名.com`，），不填则使用 Worker 默认域名( `*.worker.dev`) |
 
 ### 4. 绑定 KV 命名空间
 - 在 Cloudflare 控制台创建一个 KV 命名空间，名称随意。
 - 回到 Worker 的 **Settings → KV Namespace Bindings**，点击 **Add binding**。
-- **变量名**填写：`BOT_KV`，选择你刚创建的命名空间。
+- **变量名**填写：`BOT_KV`，选择你刚创建的命名空间
 
 ### 5. 绑定自定义域（用于验证页面）
-如果你设置了 `VERIFY_DOMAIN` 环境变量（例如 `verify.你的域名.com`），需要将该域名绑定到 Worker：
-- 进入 Worker **Triggers** → **Custom Domains** → **Add Custom Domain**。
-- 输入 `verify.你的域名.com`，并按提示完成 DNS 配置。
-- 同时确保在 Cloudflare Turnstile 设置中，也将这个域名加入允许列表。
-- 
-注意事项:
-- 如果你使用的是worker所提供的默认域名，此操作仅需要在Cloudflare Turnstile设置将默认域名加入允许列表即可
+如果你设置了 `VERIFY_DOMAIN` 环境变量（例如 `verify.你的域名.com`）需要将该域名绑定到 Worker：
+- 进入 Worker **Triggers** → **Custom Domains** → **Add Custom Domain**
+- 输入 `verify.你的域名.com`，并按提示完成 DNS 配置
+- 同时确保在 Cloudflare Turnstile 设置中，也将这个域名加入允许列表
+
+注意事项: 如果你使用的是worker所提供的默认域名，请注意下两点
+- 将`verify.你的域名.com` 更换为Worekr所提供的默认域名
+- Cloudflare Turnstile设置将默认域名加入允许列表即可
 
 ### 6. 安装 Webhook
 访问以下地址完成 Webhook 注册和命令菜单设置：
-https://你的域名/public/install
+https://你的Worekt默认域名/public/install
 
 
 
 浏览器返回 `{"success":true,"message":"Webhook installed and commands set"}` 即表示成功。
 
 ### 7. 开始使用
-- 给机器人发送任意消息，根据提示完成人机验证（若已启用）。
-- 管理员可使用命令：`/start`、`/help`、`/lock`、`/unlock`、`/ban`、`/unban`、`/unverify`。
-- 管理员收到的每条用户消息下方都有快捷操作按钮。
+- 给机器人发送任意消息，根据提示完成人机验证（若已启用）
+- 管理员可使用命令：`/start`、`/help`、`/lock`、`/unlock`、`/ban`、`/unban`、`/unverify`
+- 管理员收到的每条用户消息下方都有快捷操作按钮
 
 ## 功能命令
 
@@ -73,13 +74,11 @@ https://你的域名/public/install
 | `/unban [分钟]` | 解禁或减少封禁时间 |
 | `/unverify <用户ID>` | 清除用户验证状态 |
 
-## 开源协议
-本项目采用 **GNU General Public License v3.0**。详见 [LICENSE](LICENSE) 文件。
+## 关于
+本项目是基于 Open Wegram Bot (OWB) 二次开发
+使用 GNU General Public License v3.0 授权 详见 [LICENSE](LICENSE) 文件
 
 ## 注意事项
-- 部署后请勿公开包含敏感信息的变量或配置文件（如 `wrangler.toml`）。
-- 群组消息（ID 以 `-100` 开头）会被自动忽略。
-- Turnstile 验证一旦启用，新用户需在 5 分钟内点击一次性链接完成验证，当天有效。
-
-本项目是基于 Open Wegram Bot (OWB) 开发
-原始项目使用 GNU General Public License v3.0 授权
+- 部署后请勿公开包含敏感信息的变量或配置文件
+- 群组消息（ID 以 `-100` 开头）会被自动忽略
+- Turnstile 验证一旦启用，新用户需在 5 分钟内点击一次性链接完成验证，当天有效

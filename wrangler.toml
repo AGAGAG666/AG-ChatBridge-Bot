@@ -1,0 +1,16 @@
+name = "ag-chatbridge-bot"
+main = "worker.js"
+compatibility_date = "2025-04-01"
+
+[vars]
+ADMIN_UID = ""
+BOT_TOKEN = ""
+SECRET_TOKEN = ""
+TURNSTILE_SITE_KEY = ""
+TURNSTILE_SECRET_KEY = ""
+VERIFY_DOMAIN = ""
+
+[[kv_namespaces]]
+binding = "BOT_KV"
+id = ""
+preview_id = ""

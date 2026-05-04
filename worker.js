@@ -94,16 +94,18 @@ const htmlCard = (title, message, extra = '') => `<!DOCTYPE html>
 </html>`;
 
 async function isVerified(userId, env) {
-    const cacheKey = `https://wegram-verify/verified:${userId}`;
-    const cache = caches.default;
-    let resp = await cache.match(cacheKey);
-    if (resp) return true;
-    const kvVal = await env.BOT_KV.get(`verified:${userId}`);
+    const kv = env.BOT_KV;
+    // 直接查 KV（权威来源）
+    const kvVal = await kv.get(`verified:${userId}`);
     if (kvVal) {
-        const ttl = endOfDayTtl();
-        if (ttl > 0) {
-            await cache.put(cacheKey, new Response('1', { headers: { 'Cache-Control': `max-age=${ttl}` } }));
-        }
+        // 填充缓存作为加速（可选，失败不影响）
+        try {
+            const ttl = endOfDayTtl();
+            if (ttl > 0) {
+                const cacheKey = `https://wegram-verify/verified:${userId}`;
+                await caches.default.put(cacheKey, new Response('1', { headers: { 'Cache-Control': `max-age=${ttl}` } }));
+            }
+        } catch { }
         return true;
     }
     return false;
@@ -112,9 +114,13 @@ async function isVerified(userId, env) {
 async function markVerified(userId, env) {
     const ttl = endOfDayTtl();
     if (ttl <= 0) return;
-    await env.BOT_KV.put(`verified:${userId}`, '1', { expirationTtl: ttl });
-    const cacheKey = `https://wegram-verify/verified:${userId}`;
-    await caches.default.put(cacheKey, new Response('1', { headers: { 'Cache-Control': `max-age=${ttl}` } }));
+    const kv = env.BOT_KV;
+    await kv.put(`verified:${userId}`, '1', { expirationTtl: ttl });
+    // 填充缓存（可选）
+    try {
+        const cacheKey = `https://wegram-verify/verified:${userId}`;
+        await caches.default.put(cacheKey, new Response('1', { headers: { 'Cache-Control': `max-age=${ttl}` } }));
+    } catch { }
 }
 
 async function getOrCreateVerifyToken(kv, userId) {

@@ -1,10 +1,13 @@
 {
-  "name": "ag-chatbridge-bot",
+  "name": "@agagag666/ag-chatbridge-bot",
   "version": "1.0.0",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

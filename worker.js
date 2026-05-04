@@ -1,4 +1,7 @@
 // 工具函数
+// 全局验证缓存（跨请求共享，避免 KV 最终一致性延迟）
+const verifiedCache = new Map();
+
 const createApi = (botToken) => (method, body) =>
     fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
         method: 'POST',
@@ -38,6 +41,15 @@ const userCache = {
         list.unshift(user);
         if (list.length > 50) list = list.slice(0, 50);
         await kv.put('recent_users', JSON.stringify(list));
+    },
+    // 按类型筛选：私聊用户 (non-group) 或群聊
+    filter(list, showGroups) {
+        return showGroups ? list : list.filter(u => {
+            if (u.isGroup === false) return true;
+            if (u.isGroup === true) return false;
+            // 兼容旧数据（没有 isGroup 字段）
+            return !u.id?.startsWith('-100');
+        });
     }
 };
 
@@ -58,6 +70,54 @@ const pageKeyboard = (users, page) => ({
     ]
 });
 
+async function getConfig(kv, owner, turnstileEnvOn) {
+    const raw = await kv.get(`config:admin:${owner}`);
+    if (!raw) return { block_group: true, math_verify: false, turnstile: turnstileEnvOn };
+    return JSON.parse(raw);
+}
+
+const toggleKeyboard = (cfg, turnstileEnvOn) => {
+    const verifyText = `验证 ${(cfg.math_verify || cfg.turnstile) ? '🟢' : '🔴'}`;
+    const btns = [
+        [{ text: `屏蔽群组消息 ${cfg.block_group ? '🟢' : '🔴'}`, callback_data: 'toggle_block_group' }],
+        [{ text: verifyText, callback_data: 'verify_menu' }],
+        [{ text: '📢 群发', callback_data: 'broadcast_menu' }]
+    ];
+    return { inline_keyboard: btns };
+};
+
+const verifyMenuKeyboard = (cfg, turnstileEnvOn) => {
+    const btns = [];
+    btns.push([{ text: `算术验证 ${cfg.math_verify ? '🟢' : '🔴'}`, callback_data: 'toggle_math_verify' }]);
+    if (turnstileEnvOn) {
+        btns.push([{ text: `网页验证 ${cfg.turnstile ? '🟢' : '🔴'}`, callback_data: 'toggle_turnstile' }]);
+    }
+    btns.push([{ text: '🔙 返回', callback_data: 'back_to_main' }]);
+    return { inline_keyboard: btns };
+};
+
+const broadcastSelectKeyboard = (users, selected, showGroups) => {
+    const btns = [];
+    // 显示用户列表（每人一行，已选标记 ✅）
+    for (const u of users) {
+        const checked = selected.includes(u.id) ? '✅ ' : '';
+        const tag = u.isGroup ? '👥 ' : '👤 ';
+        btns.push([{ text: `${checked}${tag}${u.name || u.id} (${u.id})`, callback_data: `bsel_${u.id}` }]);
+    }
+    // 底部操作栏
+    const bottomRow = [];
+    if (users.length > 0 && selected.length < users.length) {
+        bottomRow.push({ text: '全选', callback_data: 'bselect_all' });
+    }
+    if (selected.length > 0) {
+        if (selected.length === users.length) bottomRow.push({ text: '取消全选', callback_data: 'bdeselect_all' });
+        bottomRow.push({ text: `✅ 确认发送 (${selected.length})`, callback_data: 'bconfirm' });
+    }
+    bottomRow.push({ text: showGroups ? '🙋 只看用户' : '👥 显示群聊', callback_data: 'btoggle_groups' });
+    bottomRow.push({ text: '取消', callback_data: 'bcancel' });
+    if (bottomRow.length) btns.push(bottomRow);
+    return { inline_keyboard: btns };
+};
 const statusButtons = (userId, locked, banned) => ({
     inline_keyboard: [
         [{ text: '跳转到用户', url: `tg://user?id=${userId}` }],
@@ -94,33 +154,35 @@ const htmlCard = (title, message, extra = '') => `<!DOCTYPE html>
 </html>`;
 
 async function isVerified(userId, env) {
+    const key = String(userId);
+    // 先查全局缓存（最快的，当前 worker 所有请求共享）
+    if (verifiedCache.has(key)) return true;
+    // 再查 Cache API（同边缘节点共享）
+    try {
+        const cacheKey = `https://wegram-verify/verified:${key}`;
+        const cached = await caches.default.match(cacheKey);
+        if (cached) { verifiedCache.set(key, true); return true; }
+    } catch {}
+    // 最后查 KV（持久化）
     const kv = env.BOT_KV;
-    // 直接查 KV（权威来源）
-    const kvVal = await kv.get(`verified:${userId}`);
+    const kvVal = await kv.get(`verified:${key}`);
     if (kvVal) {
-        // 填充缓存作为加速（可选，失败不影响）
-        try {
-            const ttl = endOfDayTtl();
-            if (ttl > 0) {
-                const cacheKey = `https://wegram-verify/verified:${userId}`;
-                await caches.default.put(cacheKey, new Response('1', { headers: { 'Cache-Control': `max-age=${ttl}` } }));
-            }
-        } catch { }
+        verifiedCache.set(key, true);
         return true;
     }
     return false;
 }
 
 async function markVerified(userId, env) {
+    const key = String(userId);
+    verifiedCache.set(key, true);
     const ttl = endOfDayTtl();
     if (ttl <= 0) return;
-    const kv = env.BOT_KV;
-    await kv.put(`verified:${userId}`, '1', { expirationTtl: ttl });
-    // 填充缓存（可选）
+    try { await env.BOT_KV.put(`verified:${key}`, '1', { expirationTtl: ttl }); } catch {}
     try {
-        const cacheKey = `https://wegram-verify/verified:${userId}`;
+        const cacheKey = `https://wegram-verify/verified:${key}`;
         await caches.default.put(cacheKey, new Response('1', { headers: { 'Cache-Control': `max-age=${ttl}` } }));
-    } catch { }
+    } catch {}
 }
 
 async function getOrCreateVerifyToken(kv, userId) {
@@ -213,10 +275,42 @@ const adminCmdHandlers = {
         }
     },
     '/unverify': async (args, kv, owner, tg, chatId) => {
-        const targetId = args[1];
+        let targetId = args[1];
+        if (!targetId || !/^\d+$/.test(targetId)) {
+            await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/unverify <用户数字ID>' });
+            return;
+        }
+        verifiedCache.delete(targetId);
         await kv.delete(`verified:${targetId}`);
-        await caches.default.delete(`https://wegram-verify/verified:${targetId}`);
-        await tg('sendMessage', { chat_id: chatId, text: `🔄 已清除用户 ${targetId} 的验证状态（含缓存），该用户下次发消息时需要重新验证。` });
+        try { await caches.default.delete(`https://wegram-verify/verified:${targetId}`); } catch { }
+        const stillThere = await kv.get(`verified:${targetId}`);
+        await tg('sendMessage', {
+            chat_id: chatId,
+            text: stillThere
+                ? `❌ 清除失败：key 仍存在 (${stillThere})`
+                : `🔄 已清除用户 ${targetId} 的验证状态，该用户下次发消息时需要重新验证。`
+        });
+    },
+    '/broadcast': async (args, kv, owner, tg, chatId) => {
+        const ids = args.slice(1).filter(id => /^\d+$/.test(id));
+        if (!ids.length) {
+            await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/broadcast <用户ID1> [用户ID2 ...]' });
+            return;
+        }
+        await setBroadcastState(kv, owner, { selected: ids, step: 'awaiting_content' });
+        await tg('sendMessage', {
+            chat_id: chatId,
+            text: `📝 已选择 ${ids.length} 位用户，请发送你要群发的消息（支持文字/图片/文件等）。\n\n发送 /cancel 取消群发。`
+        });
+    },
+    '/id': async (args, kv, owner, tg, chatId) => {
+        const users = await userCache.get(kv);
+        if (!users.length) {
+            await tg('sendMessage', { chat_id: chatId, text: '📭 暂无最近联系人。' });
+            return;
+        }
+        const lines = users.map((u, i) => `${i + 1}. ${u.name || '用户'} — ${u.id}`);
+        await tg('sendMessage', { chat_id: chatId, text: `📋 最近联系人（共 ${users.length} 人）：\n\n${lines.join('\n')}` });
     }
 };
 
@@ -225,6 +319,18 @@ function handleAdminCmd(args, kv, owner, tg, chatId) {
     const handler = cmd && adminCmdHandlers[cmd];
     if (handler) return handler(args, kv, owner, tg, chatId);
     return null;
+}
+
+// 群发相关 KV 辅助
+async function getBroadcastState(kv, owner) {
+    const raw = await kv.get(`broadcast:${owner}`);
+    return raw ? JSON.parse(raw) : null;
+}
+async function setBroadcastState(kv, owner, state) {
+    await kv.put(`broadcast:${owner}`, JSON.stringify(state), { expirationTtl: 3600 });
+}
+async function clearBroadcastState(kv, owner) {
+    await kv.delete(`broadcast:${owner}`);
 }
 
 export default {
@@ -240,7 +346,7 @@ export default {
                 return new Response('Unauthorized', { status: 401 });
             }
             const update = await request.json();
-            ctx.waitUntil(handleUpdate(update, env, base));
+            await handleUpdate(update, env, base);
             return new Response('OK');
         }
 
@@ -260,7 +366,7 @@ export default {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ commands: list.map(([c, d]) => ({ command: c, description: d })), scope })
             });
-            await setCmds([["start", "显示管理员信息"], ["help", "查看所有命令用法"], ["lock", "固定回复用户 /lock <ID> [分钟]"], ["unlock", "取消固定回复"], ["ban", "封禁用户 /ban <ID> [分钟]"], ["unban", "解封或减少时间 /unban [分钟]"], ["unverify", "清除用户验证 /unverify <ID>"]], { type: "chat", chat_id: ownerId });
+            await setCmds([["start", "显示管理员信息"], ["help", "查看所有命令用法"], ["lock", "固定回复用户 /lock <ID> [分钟]"], ["unlock", "取消固定回复"], ["ban", "封禁用户 /ban <ID> [分钟]"], ["unban", "解封或减少时间 /unban [分钟]"], ["unverify", "清除用户验证 /unverify <ID>"], ["id", "列出最近联系人 ID"], ["cancel", "取消当前操作"]], { type: "chat", chat_id: ownerId });
             await setCmds([["start", "了解如何使用"]], {});
 
             return new Response(JSON.stringify({ success: res.ok, message: res.ok ? 'Webhook installed' : res.description }), { status: res.ok ? 200 : 400 });
@@ -284,8 +390,9 @@ async function handleUpdate(update, env, baseUrl) {
     const verifyDomain = env.VERIFY_DOMAIN ? `https://${env.VERIFY_DOMAIN}` : baseUrl;
     const turnstileOn = !!(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY);
     const tg = createApi(env.BOT_TOKEN);
+    const cfg = await getConfig(kv, owner, turnstileOn);
 
-    if (!isOwner && chatId.toString().startsWith('-100')) return;
+    if (!isOwner && chatId.toString().startsWith('-100') && cfg.block_group) return;
 
     if (text?.startsWith('/start')) {
         if (isOwner) {
@@ -294,7 +401,12 @@ async function handleUpdate(update, env, baseUrl) {
                 tg('getChat', { chat_id: owner })
             ]);
             const u = chatData.result || {};
-            await tg('sendMessage', { chat_id: chatId, text: `👤 管理员信息：\n姓名：${u.first_name || '管理员'}\n用户名：${u.username ? '@' + u.username : '无'}\n数字ID：${u.id || owner}\n\n🤖 机器人：${me.result?.first_name || '机器人'}\n绑定状态：已激活` });
+            const cfg = await getConfig(kv, owner, turnstileOn);
+            await tg('sendMessage', {
+                chat_id: chatId,
+                text: `AG ChatBridge Bot\n\n👤 管理员信息：\n姓名：${u.first_name || '管理员'}\n用户名：${u.username ? '@' + u.username : '无'}\n数字ID：${u.id || owner}\n\n🤖 机器人：${me.result?.first_name || '机器人'}\n绑定状态：已激活\n\n🔧 功能开关：`,
+                reply_markup: toggleKeyboard(cfg, turnstileOn)
+            });
         } else {
             await tg('sendMessage', { chat_id: chatId, text: '这是一个双向机器人，我会尽快回复。' });
         }
@@ -305,7 +417,7 @@ async function handleUpdate(update, env, baseUrl) {
         const v = turnstileOn ? '- 新用户首次使用需完成人机验证（一次性链接，5分钟有效）。' : '- 人机验证未启用，新用户可直接使用。';
         await tg('sendMessage', {
             chat_id: chatId,
-            text: `📖 命令列表：\n\n/start - 显示管理员信息\n/help - 查看本帮助\n\n🔗 固定回复：\n/lock <用户ID> [分钟] - 固定回复某用户（默认10分钟）\n/unlock - 取消固定回复\n\n🚫 封禁管理：\n/ban <用户ID> [分钟] - 封禁某用户（默认10分钟）\n/unban - 立即解除封禁\n/unban <分钟> - 减少封禁剩余时间\n\n🔄 验证管理：\n/unverify <用户ID> - 清除该用户当天验证状态\n\n💡 使用提示：\n- 引用回复消息可以精准转发，且支持多次回复同一条。\n${v}\n- 群组消息（-100开头）将被自动忽略。\n- 无回复目标时直接发消息会弹出近期用户选择菜单。`
+            text: `📖 命令列表：\n\n/start - 显示管理员信息\n/help - 查看本帮助\n/id - 列出最近联系人 ID\n\n🔗 固定回复：\n/lock <用户ID> [分钟] - 固定回复某用户（默认10分钟）\n/unlock - 取消固定回复\n\n🚫 封禁管理：\n/ban <用户ID> [分钟] - 封禁某用户（默认10分钟）\n/unban - 立即解除封禁\n/unban <分钟> - 减少封禁剩余时间\n\n🔄 验证管理：\n/unverify <用户ID> - 清除该用户当天验证状态\n\n💡 使用提示：\n- 引用回复消息可以精准转发，且支持多次回复同一条。\n${v}\n- 群组消息（-100开头）将被自动忽略。\n- 无回复目标时直接发消息会弹出近期用户选择菜单。`
         });
         return;
     }
@@ -313,6 +425,34 @@ async function handleUpdate(update, env, baseUrl) {
     if (isOwner) {
         const args = text?.trim().split(/\s+/);
         if (await handleAdminCmd(args, kv, owner, tg, chatId)) return;
+
+        // 检查是否有待发送的群发
+        const bState = await getBroadcastState(kv, owner);
+        if (bState && bState.step === 'awaiting_content') {
+            // /cancel 取消群发
+            if (text === '/cancel') {
+                await clearBroadcastState(kv, owner);
+                await tg('sendMessage', { chat_id: chatId, text: '❌ 已取消群发。' });
+                return;
+            }
+            // 群发内容（文字/图片/文件等）
+            const targets = bState.selected;
+            let success = 0, fail = 0;
+            for (const targetId of targets) {
+                try {
+                    await tg('copyMessage', { chat_id: parseInt(targetId), from_chat_id: chatId, message_id: msg.message_id });
+                    success++;
+                } catch {
+                    fail++;
+                }
+            }
+            await clearBroadcastState(kv, owner);
+            await tg('sendMessage', {
+                chat_id: chatId,
+                text: `📢 群发完成：成功 ${success} 人${fail ? `，失败 ${fail} 人` : ''}`
+            });
+            return;
+        }
 
         // 引用回复：自动锁定目标并转发，带确认信息
         if (reply_to_message) {
@@ -357,17 +497,66 @@ async function handleUpdate(update, env, baseUrl) {
         return;
     }
 
-    if (turnstileOn) {
+    // 检查算术验证答案
+    if (cfg.math_verify && text) {
+        const mathAnswer = await kv.get(`math_verify:${chatId}`);
+        if (mathAnswer) {
+            if (text.trim() === mathAnswer) {
+                await kv.delete(`math_verify:${chatId}`);
+                await markVerified(chatId, env);
+                await tg('sendMessage', { chat_id: chatId, text: '✅ 验证通过，你现在可以继续使用机器人了。' });
+            } else {
+                // 答案错误：删除旧题，让下一步重新出题
+                await kv.delete(`math_verify:${chatId}`);
+                await tg('sendMessage', { chat_id: chatId, text: '❌ 答案错误，已生成新题目。' });
+            }
+            return;
+        }
+    }
+
+    // 验证逻辑：独立检查算术验证和 Turnstile 验证
+    if (cfg.math_verify || (cfg.turnstile && turnstileOn)) {
         const verified = await isVerified(chatId, env);
         if (!verified) {
-            const { token, remaining } = await getOrCreateVerifyToken(kv, chatId.toString());
-            const verifyUrl = `${verifyDomain}/${prefix}/turnstile/verify/${token}`;
-            await tg('sendMessage', {
-                chat_id: chatId,
-                text: `👋 欢迎使用本机器人，请先完成人机验证（链接将 ${remaining} 秒后过期）。`,
-                reply_markup: { inline_keyboard: [[{ text: '🤖 点击进行人机验证', url: verifyUrl }]] }
-            });
-            return;
+            // debug: 直接读一次 verified key 确认值
+            const directCheck = await kv.get(`verified:${chatId}`);
+            if (directCheck) {
+                // KV 有值但 isVerified 返回 false — 不会走到这里，因为 isVerified 也是读 KV
+            }
+            await kv.put(`_debug_verify_${chatId}`, `not_verified_${Date.now()}`, { expirationTtl: 300 });
+            let sentSomething = false;
+
+            // 算术验证（cfg.math_verify 独立开关）
+            if (cfg.math_verify) {
+                const mathAnswer = await kv.get(`math_verify:${chatId}`);
+                if (!mathAnswer) {
+                    const a = Math.floor(Math.random() * 50) + 1;
+                    const b = Math.floor(Math.random() * 50) + 1;
+                    const answer = a + b;
+                    await kv.put(`math_verify:${chatId}`, answer.toString(), { expirationTtl: 300 });
+                    await tg('sendMessage', {
+                        chat_id: chatId,
+                        text: `👋 欢迎使用本机器人，请先完成验证：${a} + ${b} = ?（请输入答案，5分钟内有效）`
+                    });
+                    sentSomething = true;
+                }
+            }
+
+            // 网页人机验证（cfg.turnstile 独立开关，需要 Turnstile 环境变量）
+            if (cfg.turnstile && turnstileOn) {
+                const { token, remaining } = await getOrCreateVerifyToken(kv, chatId.toString());
+                const verifyUrl = `${verifyDomain}/${prefix}/turnstile/verify/${token}`;
+                await tg('sendMessage', {
+                    chat_id: chatId,
+                    text: sentSomething
+                        ? `另外，你也可以通过人机验证链接完成验证（${remaining} 秒后过期）。`
+                        : `👋 欢迎使用本机器人，请先完成人机验证（链接将 ${remaining} 秒后过期）。`,
+                    reply_markup: { inline_keyboard: [[{ text: '🤖 点击进行人机验证', url: verifyUrl }]] }
+                });
+                sentSomething = true;
+            }
+
+            if (sentSomething) return;
         }
     }
 
@@ -376,7 +565,7 @@ async function handleUpdate(update, env, baseUrl) {
         await kv.put(`reply_map_${fwd.result.message_id}`, chatId.toString(), { expirationTtl: 3600 });
     }
     const userName = chat.username ? `@${chat.username}` : (chat.first_name || '用户');
-    await userCache.add(kv, { id: chatId.toString(), name: userName });
+    await userCache.add(kv, { id: chatId.toString(), name: userName, isGroup: chatId.toString().startsWith('-100') });
 
     // 通知管理员（含防重复机制：10分钟内同一用户不重复通知）
     const replyTargetNow = await getState(kv, owner, 'reply');
@@ -399,6 +588,7 @@ async function handleCallback(cb, env) {
     const { data, message, from } = cb;
     const chatId = message.chat.id;
     const msgId = message.message_id;
+    const turnstileOn = !!(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY);
     const owner = parseInt(env.ADMIN_UID);
     const kv = env.BOT_KV;
     const tg = createApi(env.BOT_TOKEN);
@@ -417,6 +607,164 @@ async function handleCallback(cb, env) {
             reply_markup: statusButtons(userId, lockId === userId, banId === userId)
         });
     };
+
+    if (data === 'verify_menu') {
+        const cfg = await getConfig(kv, owner, turnstileOn);
+        return tg('editMessageReplyMarkup', {
+            chat_id: chatId, message_id: msgId,
+            reply_markup: verifyMenuKeyboard(cfg, turnstileOn)
+        });
+    }
+
+    if (data === 'back_to_main') {
+        const cfg = await getConfig(kv, owner, turnstileOn);
+        const u = (await tg('getChat', { chat_id: owner })).result || {};
+        const me = (await tg('getMe')).result || {};
+        return tg('editMessageText', {
+            chat_id: chatId, message_id: msgId,
+            text: `AG ChatBridge Bot\n\n👤 管理员信息：\n姓名：${u.first_name || '管理员'}\n用户名：${u.username ? '@' + u.username : '无'}\n数字ID：${u.id || owner}\n\n🤖 机器人：${me.first_name || '机器人'}\n绑定状态：已激活\n\n🔧 功能开关：`,
+            reply_markup: toggleKeyboard(cfg, turnstileOn)
+        });
+    }
+
+    if (data === 'toggle_block_group' || data === 'toggle_math_verify' || data === 'toggle_turnstile') {
+        const cfg = await getConfig(kv, owner, turnstileOn);
+        if (data === 'toggle_block_group') {
+            cfg.block_group = !cfg.block_group;
+        } else if (data === 'toggle_math_verify') {
+            if (cfg.math_verify) cfg.math_verify = false;
+            else { cfg.math_verify = true; cfg.turnstile = false; }
+        } else {
+            if (cfg.turnstile) cfg.turnstile = false;
+            else { cfg.turnstile = true; cfg.math_verify = false; }
+        }
+        await kv.put(`config:admin:${owner}`, JSON.stringify(cfg));
+        if (data === 'toggle_block_group') {
+            // 主菜单按钮，更新主面板
+            const u = (await tg('getChat', { chat_id: owner })).result || {};
+            const me = (await tg('getMe')).result || {};
+            await tg('editMessageText', {
+                chat_id: chatId, message_id: msgId,
+                text: `AG ChatBridge Bot\n\n👤 管理员信息：\n姓名：${u.first_name || '管理员'}\n用户名：${u.username ? '@' + u.username : '无'}\n数字ID：${u.id || owner}\n\n🤖 机器人：${me.first_name || '机器人'}\n绑定状态：已激活\n\n🔧 功能开关：`,
+                reply_markup: toggleKeyboard(cfg, turnstileOn)
+            });
+        } else {
+            // 验证子菜单按钮，留在验证菜单中
+            await tg('editMessageReplyMarkup', {
+                chat_id: chatId, message_id: msgId,
+                reply_markup: verifyMenuKeyboard(cfg, turnstileOn)
+            });
+        }
+        return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ 已切换', show_alert: false });
+    }
+
+    // 群发：选择用户
+    if (data === 'broadcast_menu') {
+        const users = await userCache.get(kv);
+        if (!users.length) {
+            return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '📭 暂无最近联系人。', show_alert: true });
+        }
+        const broadcastState = { selected: [], step: 'select', showGroups: false };
+        await setBroadcastState(kv, owner, broadcastState);
+        const filtered = userCache.filter(users, false);
+        await tg('editMessageText', {
+            chat_id: chatId, message_id: msgId,
+            text: `📢 群发 - 选择接收用户（共 ${filtered.length} 人，总联系人 ${users.length} 人）：\n点击用户切换选择，选完后点"确认发送"。`,
+            reply_markup: broadcastSelectKeyboard(filtered, [], false)
+        });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id });
+    }
+
+    if (data === 'btoggle_groups') {
+        const users = await userCache.get(kv);
+        const bState = await getBroadcastState(kv, owner);
+        if (!bState) return;
+        bState.showGroups = !bState.showGroups;
+        await setBroadcastState(kv, owner, bState);
+        const filtered = userCache.filter(users, bState.showGroups);
+        // 清除不在当前视图中的选中
+        const validIds = new Set(filtered.map(u => u.id));
+        bState.selected = bState.selected.filter(id => validIds.has(id));
+        await setBroadcastState(kv, owner, bState);
+        await tg('editMessageText', {
+            chat_id: chatId, message_id: msgId,
+            text: `📢 群发 - 选择接收用户（共 ${filtered.length} 人，总联系人 ${users.length} 人）：\n点击用户切换选择，选完后点"确认发送"。`,
+            reply_markup: broadcastSelectKeyboard(filtered, bState.selected, bState.showGroups)
+        });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id });
+    }
+
+    if (data === 'bselect_all') {
+        const users = await userCache.get(kv);
+        const bState = await getBroadcastState(kv, owner);
+        if (!bState) return;
+        const filtered = userCache.filter(users, bState.showGroups);
+        bState.selected = filtered.map(u => u.id);
+        await setBroadcastState(kv, owner, bState);
+        await tg('editMessageReplyMarkup', {
+            chat_id: chatId, message_id: msgId,
+            reply_markup: broadcastSelectKeyboard(filtered, bState.selected, bState.showGroups)
+        });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id });
+    }
+
+    if (data === 'bdeselect_all') {
+        const users = await userCache.get(kv);
+        const bState = await getBroadcastState(kv, owner);
+        if (!bState) return;
+        const filtered = userCache.filter(users, bState.showGroups);
+        bState.selected = [];
+        await setBroadcastState(kv, owner, bState);
+        await tg('editMessageReplyMarkup', {
+            chat_id: chatId, message_id: msgId,
+            reply_markup: broadcastSelectKeyboard(filtered, bState.selected, bState.showGroups)
+        });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id });
+    }
+
+    if (data.startsWith('bsel_')) {
+        const uid = data.substring(5);
+        const users = await userCache.get(kv);
+        const bState = await getBroadcastState(kv, owner);
+        if (!bState) return;
+        const filtered = userCache.filter(users, bState.showGroups);
+        const idx = bState.selected.indexOf(uid);
+        if (idx >= 0) bState.selected.splice(idx, 1);
+        else bState.selected.push(uid);
+        await setBroadcastState(kv, owner, bState);
+        await tg('editMessageReplyMarkup', {
+            chat_id: chatId, message_id: msgId,
+            reply_markup: broadcastSelectKeyboard(filtered, bState.selected, bState.showGroups)
+        });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id });
+    }
+
+    if (data === 'bconfirm') {
+        const bState = await getBroadcastState(kv, owner);
+        if (!bState || !bState.selected.length) {
+            return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '❌ 请至少选择一位用户。', show_alert: true });
+        }
+        bState.step = 'awaiting_content';
+        await setBroadcastState(kv, owner, bState);
+        await tg('editMessageText', {
+            chat_id: chatId, message_id: msgId,
+            text: `📝 已选择 ${bState.selected.length} 位用户，请发送你要群发的消息（支持文字/图片/文件等）。\n\n发送 /cancel 取消群发。`
+        });
+        await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [[{ text: '取消群发', callback_data: 'bcancel' }]] } });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id, text: `✅ 已选 ${bState.selected.length} 人，请发送消息。`, show_alert: false });
+    }
+
+    if (data === 'bcancel') {
+        await clearBroadcastState(kv, owner);
+        const u = (await tg('getChat', { chat_id: owner })).result || {};
+        const me = (await tg('getMe')).result || {};
+        await tg('editMessageText', {
+            chat_id: chatId, message_id: msgId,
+            text: `AG ChatBridge Bot\n\n👤 管理员信息：\n姓名：${u.first_name || '管理员'}\n用户名：${u.username ? '@' + u.username : '无'}\n数字ID：${u.id || owner}\n\n🤖 机器人：${me.first_name || '机器人'}\n绑定状态：已激活\n\n🔧 功能开关：`,
+            reply_markup: toggleKeyboard(await getConfig(kv, owner, turnstileOn), turnstileOn)
+        });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '已取消群发。', show_alert: false });
+    }
 
     if (data.startsWith('page_')) {
         const page = parseInt(data.split('_')[1]);
@@ -480,6 +828,7 @@ async function handleTurnstileVerify(request, env) {
         })).json();
         if (verifyResult.success) {
             await deleteVerifyToken(env.BOT_KV, userId);
+            // 使用 markVerified（包含全局缓存、Cache API、KV 三层写入）
             await markVerified(userId, env);
             const tg = createApi(env.BOT_TOKEN);
             await tg('sendMessage', { chat_id: parseInt(userId), text: '✅ 验证通过，你现在可以继续使用机器人了。' });

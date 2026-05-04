@@ -378,15 +378,13 @@ async function handleUpdate(update, env, baseUrl) {
     const userName = chat.username ? `@${chat.username}` : (chat.first_name || '用户');
     await userCache.add(kv, { id: chatId.toString(), name: userName });
 
-    // 通知管理员（含防重复机制）
+    // 通知管理员（含防重复机制：10分钟内同一用户不重复通知）
     const replyTargetNow = await getState(kv, owner, 'reply');
     const lastNotifyKey = `last_notify:${chatId}`;
     const lastNotify = await kv.get(lastNotifyKey);
     const isDuplicate = lastNotify && (Date.now() - parseInt(lastNotify) < 600000);
 
-    if (replyTargetNow === chatId.toString() || isDuplicate) {
-        await tg('sendMessage', { chat_id: owner, text: `用户: ${userName} (${chatId}) 发来消息` });
-    } else {
+    if (!(replyTargetNow === chatId.toString() || isDuplicate)) {
         await kv.put(lastNotifyKey, Date.now().toString(), { expirationTtl: 600 });
         const [locked, ban] = [replyTargetNow, await getState(kv, owner, 'ban')];
         await tg('sendMessage', {

@@ -1,7 +1,7 @@
 # AG ChatBridge Bot
 
 一个基于 Cloudflare Workers 的 Telegram 双向私聊机器人，支持：
-<<<<<<< HEAD
+
 - 用户与管理员的私聊转发
 - 固定回复模式（无需每次引用）
 - 封禁/解封管理与动态按钮
@@ -14,6 +14,7 @@
 整合 `wrangler.toml` + `package.json`，一条命令部署到 Cloudflare Workers。
 
 ### 准备工作
+
 - Node.js 18+
 - 一个 Cloudflare 账号
 - Telegram Bot Token（在 [@BotFather](https://t.me/BotFather) 获取）
@@ -25,9 +26,7 @@
 **1. 安装**
 ```bash
 git clone https://github.com/AGAGAG666/AG-ChatBridge-Bot.git
-
 cd AG-ChatBridge-Bot
-
 npm install
 ```
 
@@ -46,7 +45,6 @@ npx wrangler kv:namespace create "BOT_KV"
 [[kv_namespaces]]
 binding = "BOT_KV"
 id = "你复制的id"
-preview_id = "你复制的id"
 ```
 
 **4. 配置环境变量**
@@ -78,6 +76,7 @@ https://你的项目名.用户名.workers.dev/public/install
 如果不想安装 Node.js，也可以通过 Cloudflare Dashboard 部署。
 
 ### 准备工作
+
 同上：Bot Token、用户数字 ID、Turnstile 密钥（可选）
 
 ### 步骤
@@ -98,12 +97,12 @@ https://你的项目名.用户名.workers.dev/public/install
 | `TURNSTILE_SECRET_KEY` | 否 | Turnstile 密钥（不填则关闭验证） |
 | `VERIFY_DOMAIN` | 否 | 验证页面自定义域名（默认用 Worker 域名） |
 
-### 4. 绑定 KV 命名空间
+**3. 绑定 KV 命名空间**
 - 在 Cloudflare 控制台创建一个 KV 命名空间。
 - 在 Worker **Settings → KV Namespace Bindings** 中点击 **Add binding**。
 - **变量名**填写 `BOT_KV`，选择刚创建的命名空间。
 
-### 5. 绑定自定义域（用于验证页面）
+**4. 绑定自定义域（用于验证页面）**
 如果设置了 `VERIFY_DOMAIN`（例如 `verify.你的域名.com`），需要将该域名绑定到 Worker：
 - 进入 Worker **Triggers → Custom Domains → Add Custom Domain**
 - 输入域名并完成 DNS 配置
@@ -113,60 +112,20 @@ https://你的项目名.用户名.workers.dev/public/install
 - 将 `VERIFY_DOMAIN` 设为 Worker 的默认域名
 - 在 Turnstile 设置中将默认域名加入允许列表
 
-### 6. 安装 Webhook
+**5. 安装 Webhook**
 访问以下地址完成 Webhook 注册和命令菜单设置：
-
 ```
 https://你的Worker默认域名/public/install
 ```
+返回 `{"success":true,"message":"Webhook installed and commands set"}` 即成功。
 
-返回以下内容即表示成功：
-
-```json
-{"success":true,"message":"Webhook installed and commands set"}
-```
-
-### 7. 开始使用
+**6. 开始使用**
 - 给机器人发消息（如启用验证需先完成人机验证）
 - 管理员可使用命令管理
 
 ## 架构
 
-### 路由
-
-| 路径 | 处理函数 | 说明 |
-|------|----------|------|
-| `/{prefix}/webhook` | `handleUpdate()` | Telegram webhook 入口，处理消息和回调 |
-| `/{prefix}/install` | 内联逻辑 | 注册 webhook + 设置 Bot Commands |
-| `/{prefix}/turnstile/verify/:token` | `handleTurnstileVerify()` | 人机验证页面和处理 |
-
-### 数据流
-
-1. 用户发消息 → Telegram 调用 webhook（`POST /{prefix}/webhook`）
-2. `handleUpdate()` 检查封禁/验证状态：
-   - 已封禁 → 返回提示
-   - 未验证（启用了 Turnstile）→ 返回验证链接
-   - 通过验证 → `forwardMessage` 转发给管理员
-3. 管理员收到消息（附带 inline 操作按钮），回复方式：
-   - **引用回复** → 通过 `reply_map_` KV 映射找到目标用户，自动转发
-   - **固定回复模式** → `/lock <ID>` 后，所有消息直接转发到该用户
-   - **无目标** → 弹出近期联系人选择菜单
-4. 管理员消息通过 `copyMessage` 转发给用户，保留原消息类型
-
-### KV 存储
-
-| Key 模式 | 用途 | 过期 |
-|----------|------|------|
-| `reply_target:{owner}` | 当前固定回复目标用户 ID | 自定义 |
-| `reply_target_expire:{owner}` | 固定回复过期时间戳 | - |
-| `ban:{owner}` | 被封禁用户 ID | 自定义 |
-| `ban_expire:{owner}` | 封禁过期时间戳 | - |
-| `reply_map_{messageId}` | 转发消息 ID → 用户 ID | 1 小时 |
-| `verified:{userId}` | 验证通过标记 | 当天截止 |
-| `pending_verify:{userId}` | 待验证令牌+时间戳 | 5 分钟 |
-| `verify_token:{token}` | 验证令牌 → 用户 ID | 5 分钟 |
-| `recent_users` | 最近联系人列表（最多 50 个） | 永久 |
-| `last_notify:{userId}` | 上次通知管理员时间戳 | 10 分钟 |
+详见 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 ### 管理员命令
 
@@ -187,105 +146,29 @@ https://你的Worker默认域名/public/install
 - 固定回复：通过 `/lock <ID>` 或按钮操作设置，之后管理员发的所有非命令消息都直接转发给该用户
 
 **防重复通知：**
-- 同一用户在 10 分钟内多次发消息，不再重复显示操作按钮，仅发文字通知
+- 同一用户在 10 分钟内多次发消息，不再重复显示操作按钮
 
 **动态按钮：**
 - 管理员收到的每条消息下方有 **固定回复/封禁** 按钮
 - 状态实时更新（按钮文字会根据当前状态显示"固定回复"或"取消固定回复"）
 
+**人机验证：**
+- 启用 Turnstile 后，新用户首次使用需完成人机验证（一次性链接，5 分钟有效）
+- 验证通过后当天有效
+
 ## 安全
+
 - Webhook 通过 `X-Telegram-Bot-Api-Secret-Token` header 验证
 - 群组消息（chatId 以 `-100` 开头）自动忽略
 - 回调按钮仅管理员可操作
 - Secret Token 和 Bot Token 等敏感信息通过环境变量注入
 
 ## 关于
+
 本项目基于 Open Wegram Bot (OWB) 二次开发，使用 GNU General Public License v3.0 授权。
 
 ## 注意事项
+
 - 请勿公开包含敏感信息的变量或配置文件
 - 群组消息会被自动忽略
 - Turnstile 验证启用后，新用户需在 5 分钟内完成验证，验证当天有效
-=======
-- 📩 用户与管理员的私聊转发
-- 🔗 固定回复模式（无需每次引用）
-- 🚫 封禁/解封管理与动态按钮
-- 🤖 Turnstile 人机验证（可选，带倒计时一次性令牌）
-- 👥 近期联系人选择菜单
-- 🎨 内建黑色主题验证页面
-
-## 快速部署
-
-### 1. 准备工作
-- 一个 Cloudflare 账号
-- 一个 Telegram Bot Token（在 [@BotFather](https://t.me/BotFather) 创建）
-- 你的 Telegram 用户数字 ID（可以通过 [@userinfobot](https://t.me/userinfobot) 获取）
-- （可选）Cloudflare Turnstile 站点密钥和密钥，用于开启人机验证
-
-### 2. 在 Cloudflare Workers 中部署
-1. 登录 Cloudflare 控制台 → **Workers & Pages** → 创建应用程序 → 选择 **Workers**。
-2. 将 `worker.js` 的内容完整粘贴到代码编辑器。
-3. 点击 **部署**。
-
-### 3. 配置环境变量
-进入 Worker 的 **Settings → Variables**，添加以下变量：
-
-| 变量名 | 必填 | 说明 |
-|--------|------|------|
-| `ADMIN_UID` | ✅ | 你的 Telegram 数字 ID |
-| `BOT_TOKEN` | ✅ | 机器人 Token |
-| `PREFIX` | 可选 | URL 路径前缀，默认 `public` |
-| `SECRET_TOKEN` | 可选 | Webhook 安全验证令牌（建议设置） |
-| `TURNSTILE_SITE_KEY` | 可选 | Turnstile 站点密钥 (不填则关闭验证) |
-| `TURNSTILE_SECRET_KEY` | 可选 | Turnstile 密钥 (不填则关闭验证) |
-| `VERIFY_DOMAIN` | 可选 | 用于展示验证页面的自定义域名（例如 `verify.你的域名.com`，），不填则使用 Worker 默认域名( `*.worker.dev`) |
-
-### 4. 绑定 KV 命名空间
-- 在 Cloudflare 控制台创建一个 KV 命名空间，名称随意。
-- 回到 Worker 的 **Settings → KV Namespace Bindings**，点击 **Add binding**。
-- **变量名**填写：`BOT_KV`，选择你刚创建的命名空间
-
-### 5. 绑定自定义域（用于验证页面）
-如果你设置了 `VERIFY_DOMAIN` 环境变量（例如 `verify.你的域名.com`）需要将该域名绑定到 Worker：
-- 进入 Worker **Triggers** → **Custom Domains** → **Add Custom Domain**
-- 输入 `verify.你的域名.com`，并按提示完成 DNS 配置
-- 同时确保在 Cloudflare Turnstile 设置中，也将这个域名加入允许列表
-
-注意事项: 如果你使用的是worker所提供的默认域名，请注意下两点
-- 将`verify.你的域名.com` 更换为Worekr所提供的默认域名
-- Cloudflare Turnstile设置将默认域名加入允许列表即可
-
-### 6. 安装 Webhook
-访问以下地址完成 Webhook 注册和命令菜单设置：
-https://你的Worekt默认域名/public/install
-
-
-
-浏览器返回 `{"success":true,"message":"Webhook installed and commands set"}` 即表示成功。
-
-### 7. 开始使用
-- 给机器人发送任意消息，根据提示完成人机验证（若已启用）
-- 管理员可使用命令：`/start`、`/help`、`/lock`、`/unlock`、`/ban`、`/unban`、`/unverify`
-- 管理员收到的每条用户消息下方都有快捷操作按钮
-
-## 功能命令
-
-| 命令 | 说明 |
-|------|------|
-| `/start` | 查看信息 |
-| `/help` | 列出所有命令 |
-| `/lock <用户ID> [分钟]` | 设置固定回复目标 |
-| `/unlock` | 取消固定回复 |
-| `/ban <用户ID> [分钟]` | 封禁用户 |
-| `/unban [分钟]` | 解禁或减少封禁时间 |
-| `/unverify <用户ID>` | 清除用户验证状态 |
-
-## 关于
-本项目是基于 Open Wegram Bot (OWB) 二次开发
-使用 GNU General Public License v3.0 授权 详见 [LICENSE](LICENSE) 文件
-
-## 注意事项
-- 部署后请勿公开包含敏感信息的变量或配置文件
-- 群组消息（ID 以 `-100` 开头）会被自动忽略
-- Turnstile 验证一旦启用，新用户需在 5 分钟内点击一次性链接完成验证，当天有效
->>>>>>> efafbb7a9c6b183eb9d196cba13a9cb3072e3700

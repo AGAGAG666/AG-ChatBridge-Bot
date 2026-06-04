@@ -70,6 +70,16 @@ const pageKeyboard = (users, page) => ({
     ]
 });
 
+const banPageKeyboard = (users, page) => ({
+    inline_keyboard: [
+        ...users.slice((page - 1) * 5, page * 5).map(u => [{ text: `${u.name || u.id} (${u.id})`, callback_data: `bansel_${u.id}` }]),
+        [
+            (page > 1 ? { text: '← 上一页', callback_data: `banpage_${page - 1}` } : { text: ' ', callback_data: 'noop' }),
+            (page < Math.ceil(users.length / 5) ? { text: '下一页 →', callback_data: `banpage_${page + 1}` } : { text: ' ', callback_data: 'noop' })
+        ]
+    ]
+});
+
 async function getConfig(kv, owner, turnstileEnvOn) {
     const raw = await kv.get(`config:admin:${owner}`);
     if (!raw) return { block_group: true, math_verify: false, turnstile: turnstileEnvOn };
@@ -259,7 +269,16 @@ const adminCmdHandlers = {
         await tg('sendMessage', { chat_id: chatId, text: '🔓 已取消固定回复。' });
     },
     '/ban': async (args, kv, owner, tg, chatId) => {
-        if (!args[1] || !/^-?\d+$/.test(args[1])) {
+        if (!args[1]) {
+            const users = await userCache.get(kv);
+            if (users.length) {
+                await tg('sendMessage', { chat_id: chatId, text: '请选择要封禁的用户（第1页）', reply_markup: banPageKeyboard(users, 1) });
+            } else {
+                await tg('sendMessage', { chat_id: chatId, text: '❌ 暂无最近联系人，请使用：/ban <用户数字ID> [分钟]' });
+            }
+            return;
+        }
+        if (!/^-?\d+$/.test(args[1])) {
             await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/ban <用户数字ID> [分钟]' });
             return;
         }
@@ -797,6 +816,22 @@ async function handleCallback(cb, env) {
         await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
         await tg('sendMessage', { chat_id: chatId, text: `✅ 已设置固定回复目标：${userId}，时长 10 分钟。` });
         return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ 已设置固定回复目标', show_alert: false });
+    }
+
+    if (data.startsWith('banpage_')) {
+        const page = parseInt(data.split('_')[1]);
+        const users = await userCache.get(kv);
+        await tg('editMessageText', { chat_id: chatId, message_id: msgId, text: `请选择要封禁的用户（第${page}页）` });
+        await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: banPageKeyboard(users, page) });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id });
+    }
+
+    if (data.startsWith('bansel_')) {
+        const userId = data.substring(6);
+        stateActions.ban.set(kv, owner, userId, 10);
+        await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
+        await tg('sendMessage', { chat_id: chatId, text: `🚫 已封禁用户 ${userId}，时长 10 分钟。` });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '🚫 已封禁用户', show_alert: false });
     }
 
     const [action, userId] = data.split('_');

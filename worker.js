@@ -574,7 +574,15 @@ async function handleUpdate(update, env, baseUrl) {
             // 网页人机验证（cfg.turnstile 独立开关，需要 Turnstile 环境变量）
             if (cfg.turnstile && turnstileOn) {
                 const { token, remaining } = await getOrCreateVerifyToken(kv, chatId.toString());
-                const verifyUrl = `${verifyDomain}/${prefix}/turnstile/verify/${token}`;
+                // 使用 VERIFY_DOMAIN 作为 Pages 域名，否则使用 Worker 内置页面
+                let verifyUrl;
+                if (env.VERIFY_DOMAIN) {
+                    // 如果配置了 VERIFY_DOMAIN，使用独立的 Pages 页面
+                    verifyUrl = `https://${env.VERIFY_DOMAIN}?token=${token}`;
+                } else {
+                    // 否则使用 Worker 内置页面（保留旧行为）
+                    verifyUrl = `${verifyDomain}/${prefix}/turnstile/verify/${token}`;
+                }
                 await tg('sendMessage', {
                     chat_id: chatId,
                     text: sentSomething
@@ -844,10 +852,27 @@ async function handleTurnstileVerify(request, env) {
     const prefix = env.PREFIX || 'public';
     const token = new URL(request.url).pathname.split('/').pop();
     if (!token || (!env.TURNSTILE_SITE_KEY && !env.TURNSTILE_SECRET_KEY)) {
+        // 检查是否需要 JSON 响应
+        const acceptHeader = request.headers.get('accept') || '';
+        if (acceptHeader.includes('application/json')) {
+            return new Response(JSON.stringify({ success: false, error: 'not_enabled' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
         return new Response(htmlCard('人机验证未启用', '<p>功能未配置</p>'), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
     const userId = await env.BOT_KV.get(`verify_token:${token}`);
-    if (!userId) return new Response(htmlCard('链接无效', '<p>验证链接已过期或不存在</p>'), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    if (!userId) {
+        const acceptHeader = request.headers.get('accept') || '';
+        if (acceptHeader.includes('application/json')) {
+            return new Response(JSON.stringify({ success: false, error: 'invalid_token' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        return new Response(htmlCard('链接无效', '<p>验证链接已过期或不存在</p>'), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
 
     if (request.method === 'GET') {
         return new Response(htmlCard('🤖 人机验证',
@@ -867,18 +892,56 @@ async function handleTurnstileVerify(request, env) {
         );
     }
     if (request.method === 'POST') {
-        const form = await request.formData();
+        let turnstileToken;
+        let clientToken;
+        try {
+            const contentType = request.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                // 来自前端页面的 JSON 请求
+                const data = await request.json();
+                turnstileToken = data['cf-turnstile-response'];
+                clientToken = data.token || token;
+            } else {
+                // 来自表单提交（旧方式）
+                const form = await request.formData();
+                turnstileToken = form.get('cf-turnstile-response');
+                clientToken = form.get('token') || token;
+            }
+        } catch (e) {
+            return new Response(JSON.stringify({ success: false, error: 'invalid_request' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        // 验证 Turnstile
         const verifyResult = await (await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ secret: env.TURNSTILE_SECRET_KEY, response: form.get('cf-turnstile-response') })
+            body: JSON.stringify({ secret: env.TURNSTILE_SECRET_KEY, response: turnstileToken })
         })).json();
+
         if (verifyResult.success) {
             await deleteVerifyToken(env.BOT_KV, userId);
-            // 使用 markVerified（包含全局缓存、Cache API、KV 三层写入）
             await markVerified(userId, env);
             const tg = createApi(env.BOT_TOKEN);
             await tg('sendMessage', { chat_id: parseInt(userId), text: '✅ 验证通过，你现在可以继续使用机器人了。' });
+            // 根据请求类型返回不同响应
+            const acceptHeader = request.headers.get('accept') || '';
+            if (acceptHeader.includes('application/json')) {
+                return new Response(JSON.stringify({ success: true }), {
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
             return new Response(htmlCard('✅ 验证成功', '<p>你可以返回 Telegram 继续对话了</p>'), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+        }
+
+        // 验证失败
+        const acceptHeader = request.headers.get('accept') || '';
+        if (acceptHeader.includes('application/json')) {
+            return new Response(JSON.stringify({ success: false, error: 'verify_failed' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
         }
         return new Response(htmlCard('❌ 验证失败', '<p>请返回刷新页面重试</p>'), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }

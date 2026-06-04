@@ -1,4 +1,16 @@
-// 工具函数
+// ======== 常量定义 ========
+const CONSTANTS = {
+    MAX_RECENT_USERS: 50,
+    PAGE_SIZE: 5,
+    DEFAULT_DURATION_MIN: 10,
+    VERIFY_TOKEN_EXPIRE_SEC: 300,
+    BROADCAST_EXPIRE_SEC: 3600,
+    REPLY_MAP_EXPIRE_SEC: 3600,
+    NOTIFY_COOLDOWN_SEC: 600,
+    MATH_VERIFY_EXPIRE_SEC: 300
+};
+
+// ======== 工具函数 ========
 // 全局验证缓存（跨请求共享，避免 KV 最终一致性延迟）
 const verifiedCache = new Map();
 
@@ -39,15 +51,13 @@ const userCache = {
         let list = await this.get(kv);
         list = list.filter(u => u.id !== user.id);
         list.unshift(user);
-        if (list.length > 50) list = list.slice(0, 50);
+        if (list.length > CONSTANTS.MAX_RECENT_USERS) list = list.slice(0, CONSTANTS.MAX_RECENT_USERS);
         await kv.put('recent_users', JSON.stringify(list));
     },
-    // 按类型筛选：私聊用户 (non-group) 或群聊
     filter(list, showGroups) {
         return showGroups ? list : list.filter(u => {
             if (u.isGroup === false) return true;
             if (u.isGroup === true) return false;
-            // 兼容旧数据（没有 isGroup 字段）
             return !u.id?.startsWith('-100');
         });
     }
@@ -60,22 +70,13 @@ const sentKeyboard = (target, showUnlock = true) => ({
     ]]
 });
 
-const pageKeyboard = (users, page) => ({
+// 通用用户选择菜单键盘
+const userSelectKeyboard = (users, page, prefix) => ({
     inline_keyboard: [
-        ...users.slice((page - 1) * 5, page * 5).map(u => [{ text: `${u.name || u.id} (${u.id})`, callback_data: `sel_${u.id}` }]),
+        ...users.slice((page - 1) * CONSTANTS.PAGE_SIZE, page * CONSTANTS.PAGE_SIZE).map(u => [{ text: `${u.name || u.id} (${u.id})`, callback_data: `${prefix}sel_${u.id}` }]),
         [
-            (page > 1 ? { text: '← 上一页', callback_data: `page_${page - 1}` } : { text: ' ', callback_data: 'noop' }),
-            (page < Math.ceil(users.length / 5) ? { text: '下一页 →', callback_data: `page_${page + 1}` } : { text: ' ', callback_data: 'noop' })
-        ]
-    ]
-});
-
-const banPageKeyboard = (users, page) => ({
-    inline_keyboard: [
-        ...users.slice((page - 1) * 5, page * 5).map(u => [{ text: `${u.name || u.id} (${u.id})`, callback_data: `bansel_${u.id}` }]),
-        [
-            (page > 1 ? { text: '← 上一页', callback_data: `banpage_${page - 1}` } : { text: ' ', callback_data: 'noop' }),
-            (page < Math.ceil(users.length / 5) ? { text: '下一页 →', callback_data: `banpage_${page + 1}` } : { text: ' ', callback_data: 'noop' })
+            (page > 1 ? { text: '← 上一页', callback_data: `${prefix}page_${page - 1}` } : { text: ' ', callback_data: 'noop' }),
+            (page < Math.ceil(users.length / CONSTANTS.PAGE_SIZE) ? { text: '下一页 →', callback_data: `${prefix}page_${page + 1}` } : { text: ' ', callback_data: 'noop' })
         ]
     ]
 });
@@ -200,15 +201,15 @@ async function getOrCreateVerifyToken(kv, userId) {
     const pendingData = await kv.get(pendingKey);
     if (pendingData) {
         const [token, timestamp] = pendingData.split(':');
-        const remaining = Math.max(0, 300 - Math.floor((Date.now() - parseInt(timestamp)) / 1000));
+        const remaining = Math.max(0, CONSTANTS.VERIFY_TOKEN_EXPIRE_SEC - Math.floor((Date.now() - parseInt(timestamp)) / 1000));
         if (remaining > 0) return { token, remaining };
         await kv.delete(pendingKey);
         await kv.delete(`verify_token:${token}`);
     }
     const token = crypto.randomUUID();
-    await kv.put(`verify_token:${token}`, userId, { expirationTtl: 300 });
-    await kv.put(pendingKey, `${token}:${Date.now()}`, { expirationTtl: 300 });
-    return { token, remaining: 300 };
+    await kv.put(`verify_token:${token}`, userId, { expirationTtl: CONSTANTS.VERIFY_TOKEN_EXPIRE_SEC });
+    await kv.put(pendingKey, `${token}:${Date.now()}`, { expirationTtl: CONSTANTS.VERIFY_TOKEN_EXPIRE_SEC });
+    return { token, remaining: CONSTANTS.VERIFY_TOKEN_EXPIRE_SEC };
 }
 
 async function deleteVerifyToken(kv, userId) {
@@ -242,51 +243,48 @@ async function sendSentConfirm(tg, chatId, target, targetName) {
     });
 }
 
-// 管理员命令处理
+// ======== 管理员命令处理 ========
+// 通用用户选择与设置函数
+const handleUserSelectCommand = async (args, kv, owner, tg, chatId, config) => {
+    const { cmd, prefix, successMsg, noUserMsg, usageMsg } = config;
+    if (!args[1]) {
+        const users = await userCache.get(kv);
+        if (users.length) {
+            await tg('sendMessage', { chat_id: chatId, text: `请选择${prefix}对象（第1页）`, reply_markup: userSelectKeyboard(users, 1, cmd) });
+        } else {
+            await tg('sendMessage', { chat_id: chatId, text: noUserMsg });
+        }
+        return true;
+    }
+    if (!/^-?\d+$/.test(args[1])) {
+        await tg('sendMessage', { chat_id: chatId, text: usageMsg });
+        return true;
+    }
+    const mins = parseInt(args[2]) || CONSTANTS.DEFAULT_DURATION_MIN;
+    stateActions[cmd].set(kv, owner, args[1], mins);
+    await tg('sendMessage', { chat_id: chatId, text: successMsg(args[1], mins) });
+    return true;
+};
+
 const adminCmdHandlers = {
-    '/lock': async (args, kv, owner, tg, chatId) => {
-        if (!args[1]) {
-            const users = await userCache.get(kv);
-            if (users.length) {
-                await tg('sendMessage', { chat_id: chatId, text: '请选择固定回复对象（第1页）', reply_markup: pageKeyboard(users, 1) });
-            } else {
-                await tg('sendMessage', { chat_id: chatId, text: '❌ 暂无最近联系人，请使用：/lock <用户数字ID> [分钟]' });
-            }
-            return;
-        }
-        if (!/^-?\d+$/.test(args[1])) {
-            await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/lock <用户数字ID> [分钟]' });
-            return;
-        }
-        const mins = parseInt(args[2]) || 10;
-        await kv.put(`reply_target:${owner}`, args[1]);
-        await kv.put(`reply_target_expire:${owner}`, (Date.now() + mins * 60000).toString());
-        await tg('sendMessage', { chat_id: chatId, text: `✅ 已设置固定回复目标：${args[1]}，时长 ${mins} 分钟。` });
-    },
+    '/lock': (args, kv, owner, tg, chatId) => handleUserSelectCommand(args, kv, owner, tg, chatId, {
+        cmd: 'lock',
+        prefix: '固定回复',
+        noUserMsg: '❌ 暂无最近联系人，请使用：/lock <用户数字ID> [分钟]',
+        usageMsg: '❌ 用法：/lock <用户数字ID> [分钟]',
+        successMsg: (id, mins) => `✅ 已设置固定回复目标：${id}，时长 ${mins} 分钟。`
+    }),
     '/unlock': async (args, kv, owner, tg, chatId) => {
-        await kv.delete(`reply_target:${owner}`);
-        await kv.delete(`reply_target_expire:${owner}`);
+        stateActions.lock.del(kv, owner);
         await tg('sendMessage', { chat_id: chatId, text: '🔓 已取消固定回复。' });
     },
-    '/ban': async (args, kv, owner, tg, chatId) => {
-        if (!args[1]) {
-            const users = await userCache.get(kv);
-            if (users.length) {
-                await tg('sendMessage', { chat_id: chatId, text: '请选择要封禁的用户（第1页）', reply_markup: banPageKeyboard(users, 1) });
-            } else {
-                await tg('sendMessage', { chat_id: chatId, text: '❌ 暂无最近联系人，请使用：/ban <用户数字ID> [分钟]' });
-            }
-            return;
-        }
-        if (!/^-?\d+$/.test(args[1])) {
-            await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/ban <用户数字ID> [分钟]' });
-            return;
-        }
-        const mins = parseInt(args[2]) || 10;
-        await kv.put(`ban:${owner}`, args[1]);
-        await kv.put(`ban_expire:${owner}`, (Date.now() + mins * 60000).toString());
-        await tg('sendMessage', { chat_id: chatId, text: `🚫 已封禁用户 ${args[1]}，时长 ${mins} 分钟。` });
-    },
+    '/ban': (args, kv, owner, tg, chatId) => handleUserSelectCommand(args, kv, owner, tg, chatId, {
+        cmd: 'ban',
+        prefix: '要封禁的',
+        noUserMsg: '❌ 暂无最近联系人，请使用：/ban <用户数字ID> [分钟]',
+        usageMsg: '❌ 用法：/ban <用户数字ID> [分钟]',
+        successMsg: (id, mins) => `🚫 已封禁用户 ${id}，时长 ${mins} 分钟。`
+    }),
     '/unban': async (args, kv, owner, tg, chatId) => {
         const expStr = await kv.get(`ban_expire:${owner}`);
         if (args.length >= 2) {
@@ -363,7 +361,7 @@ async function getBroadcastState(kv, owner) {
     return raw ? JSON.parse(raw) : null;
 }
 async function setBroadcastState(kv, owner, state) {
-    await kv.put(`broadcast:${owner}`, JSON.stringify(state), { expirationTtl: 3600 });
+    await kv.put(`broadcast:${owner}`, JSON.stringify(state), { expirationTtl: CONSTANTS.BROADCAST_EXPIRE_SEC });
 }
 async function clearBroadcastState(kv, owner) {
     await kv.delete(`broadcast:${owner}`);
@@ -453,7 +451,7 @@ async function handleUpdate(update, env, baseUrl) {
         const v = turnstileOn ? '- 新用户首次使用需完成人机验证（一次性链接，5分钟有效）。' : '- 人机验证未启用，新用户可直接使用。';
         await tg('sendMessage', {
             chat_id: chatId,
-            text: `📖 命令列表：\n\n/start - 显示管理员信息\n/help - 查看本帮助\n/id - 列出最近联系人 ID\n\n🔗 固定回复：\n/lock <用户ID> [分钟] - 固定回复某用户（默认10分钟）\n/unlock - 取消固定回复\n\n🚫 封禁管理：\n/ban <用户ID> [分钟] - 封禁某用户（默认10分钟）\n/unban - 立即解除封禁\n/unban <分钟> - 减少封禁剩余时间\n\n🔄 验证管理：\n/unverify <用户ID> - 清除该用户当天验证状态\n\n💡 使用提示：\n- 引用回复消息可以精准转发，且支持多次回复同一条。\n${v}\n- 群组消息（-100开头）将被自动忽略。\n- 无回复目标时直接发消息会弹出近期用户选择菜单。`
+            text: `📖 命令列表：\n\n/start - 显示管理员信息\n/help - 查看本帮助\n/id - 列出最近联系人 ID\n\n🔗 固定回复：\n/lock <用户ID> [分钟] - 固定回复某用户（默认${CONSTANTS.DEFAULT_DURATION_MIN}分钟）\n/unlock - 取消固定回复\n\n🚫 封禁管理：\n/ban <用户ID> [分钟] - 封禁某用户（默认${CONSTANTS.DEFAULT_DURATION_MIN}分钟）\n/unban - 立即解除封禁\n/unban <分钟> - 减少封禁剩余时间\n\n🔄 验证管理：\n/unverify <用户ID> - 清除该用户当天验证状态\n\n💡 使用提示：\n- 引用回复消息可以精准转发，且支持多次回复同一条。\n${v}\n- 群组消息（-100开头）将被自动忽略。\n- 无回复目标时直接发消息会弹出近期用户选择菜单。`
         });
         return;
     }
@@ -465,13 +463,11 @@ async function handleUpdate(update, env, baseUrl) {
         // 检查是否有待发送的群发
         const bState = await getBroadcastState(kv, owner);
         if (bState && bState.step === 'awaiting_content') {
-            // /cancel 取消群发
             if (text === '/cancel') {
                 await clearBroadcastState(kv, owner);
                 await tg('sendMessage', { chat_id: chatId, text: '❌ 已取消群发。' });
                 return;
             }
-            // 群发内容（文字/图片/文件等）
             const targets = bState.selected;
             let success = 0, fail = 0;
             for (const targetId of targets) {
@@ -490,7 +486,6 @@ async function handleUpdate(update, env, baseUrl) {
             return;
         }
 
-        // 引用回复：自动锁定目标并转发，带确认信息
         if (reply_to_message) {
             const key = `reply_map_${reply_to_message.message_id}`;
             let target = await kv.get(key);
@@ -499,14 +494,13 @@ async function handleUpdate(update, env, baseUrl) {
                 if (m) target = m[1];
             }
             if (target) {
-                stateActions.lock.set(kv, owner, target, 10);
+                stateActions.lock.set(kv, owner, target, CONSTANTS.DEFAULT_DURATION_MIN);
                 await tg('copyMessage', { chat_id: parseInt(target), from_chat_id: chatId, message_id: msg.message_id });
                 await sendSentConfirm(tg, chatId, target, await getUserName(tg, target));
             }
             return;
         }
 
-        // 固定回复转发
         const replyTarget = await getState(kv, owner, 'reply');
         if (replyTarget && (text || caption) && !text?.startsWith('/')) {
             await tg('copyMessage', { chat_id: parseInt(replyTarget), from_chat_id: chatId, message_id: msg.message_id });
@@ -514,11 +508,10 @@ async function handleUpdate(update, env, baseUrl) {
             return;
         }
 
-        // 无目标时弹出选择菜单
         if (!text?.startsWith('/')) {
             const users = await userCache.get(kv);
             if (users.length) {
-                await tg('sendMessage', { chat_id: chatId, text: '请选择回复对象（第1页）', reply_markup: pageKeyboard(users, 1) });
+                await tg('sendMessage', { chat_id: chatId, text: '请选择回复对象（第1页）', reply_markup: userSelectKeyboard(users, 1, '') });
             } else {
                 await tg('sendMessage', { chat_id: chatId, text: '目前没有可以选择的用户。' });
             }
@@ -559,7 +552,7 @@ async function handleUpdate(update, env, baseUrl) {
             if (directCheck) {
                 // KV 有值但 isVerified 返回 false — 不会走到这里，因为 isVerified 也是读 KV
             }
-            await kv.put(`_debug_verify_${chatId}`, `not_verified_${Date.now()}`, { expirationTtl: 300 });
+            await kv.put(`_debug_verify_${chatId}`, `not_verified_${Date.now()}`, { expirationTtl: CONSTANTS.VERIFY_TOKEN_EXPIRE_SEC });
             let sentSomething = false;
 
             // 算术验证（cfg.math_verify 独立开关）
@@ -569,7 +562,7 @@ async function handleUpdate(update, env, baseUrl) {
                     const a = Math.floor(Math.random() * 50) + 1;
                     const b = Math.floor(Math.random() * 50) + 1;
                     const answer = a + b;
-                    await kv.put(`math_verify:${chatId}`, answer.toString(), { expirationTtl: 300 });
+                    await kv.put(`math_verify:${chatId}`, answer.toString(), { expirationTtl: CONSTANTS.MATH_VERIFY_EXPIRE_SEC });
                     await tg('sendMessage', {
                         chat_id: chatId,
                         text: `👋 欢迎使用本机器人，请先完成验证：${a} + ${b} = ?（请输入答案，5分钟内有效）`
@@ -598,7 +591,7 @@ async function handleUpdate(update, env, baseUrl) {
 
     const fwd = await tg('forwardMessage', { chat_id: owner, from_chat_id: chatId, message_id: msg.message_id });
     if (fwd.ok && fwd.result) {
-        await kv.put(`reply_map_${fwd.result.message_id}`, chatId.toString(), { expirationTtl: 3600 });
+        await kv.put(`reply_map_${fwd.result.message_id}`, chatId.toString(), { expirationTtl: CONSTANTS.REPLY_MAP_EXPIRE_SEC });
     }
     const userName = chat.username ? `@${chat.username}` : (chat.first_name || '用户');
     await userCache.add(kv, { id: chatId.toString(), name: userName, isGroup: chatId.toString().startsWith('-100') });
@@ -607,10 +600,10 @@ async function handleUpdate(update, env, baseUrl) {
     const replyTargetNow = await getState(kv, owner, 'reply');
     const lastNotifyKey = `last_notify:${chatId}`;
     const lastNotify = await kv.get(lastNotifyKey);
-    const isDuplicate = lastNotify && (Date.now() - parseInt(lastNotify) < 600000);
+    const isDuplicate = lastNotify && (Date.now() - parseInt(lastNotify) < CONSTANTS.NOTIFY_COOLDOWN_SEC * 1000);
 
     if (!(replyTargetNow === chatId.toString() || isDuplicate)) {
-        await kv.put(lastNotifyKey, Date.now().toString(), { expirationTtl: 600 });
+        await kv.put(lastNotifyKey, Date.now().toString(), { expirationTtl: CONSTANTS.NOTIFY_COOLDOWN_SEC });
         const [locked, ban] = [replyTargetNow, await getState(kv, owner, 'ban')];
         await tg('sendMessage', {
             chat_id: owner,
@@ -806,15 +799,15 @@ async function handleCallback(cb, env) {
         const page = parseInt(data.split('_')[1]);
         const users = await userCache.get(kv);
         await tg('editMessageText', { chat_id: chatId, message_id: msgId, text: `请选择回复对象（第${page}页）` });
-        await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: pageKeyboard(users, page) });
+        await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: userSelectKeyboard(users, page, '') });
         return tg('answerCallbackQuery', { callback_query_id: cb.id });
     }
 
     if (data.startsWith('sel_')) {
         const userId = data.substring(4);
-        stateActions.lock.set(kv, owner, userId, 10);
+        stateActions.lock.set(kv, owner, userId, CONSTANTS.DEFAULT_DURATION_MIN);
         await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
-        await tg('sendMessage', { chat_id: chatId, text: `✅ 已设置固定回复目标：${userId}，时长 10 分钟。` });
+        await tg('sendMessage', { chat_id: chatId, text: `✅ 已设置固定回复目标：${userId}，时长 ${CONSTANTS.DEFAULT_DURATION_MIN} 分钟。` });
         return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ 已设置固定回复目标', show_alert: false });
     }
 
@@ -822,15 +815,15 @@ async function handleCallback(cb, env) {
         const page = parseInt(data.split('_')[1]);
         const users = await userCache.get(kv);
         await tg('editMessageText', { chat_id: chatId, message_id: msgId, text: `请选择要封禁的用户（第${page}页）` });
-        await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: banPageKeyboard(users, page) });
+        await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: userSelectKeyboard(users, page, 'ban') });
         return tg('answerCallbackQuery', { callback_query_id: cb.id });
     }
 
     if (data.startsWith('bansel_')) {
         const userId = data.substring(6);
-        stateActions.ban.set(kv, owner, userId, 10);
+        stateActions.ban.set(kv, owner, userId, CONSTANTS.DEFAULT_DURATION_MIN);
         await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
-        await tg('sendMessage', { chat_id: chatId, text: `🚫 已封禁用户 ${userId}，时长 10 分钟。` });
+        await tg('sendMessage', { chat_id: chatId, text: `🚫 已封禁用户 ${userId}，时长 ${CONSTANTS.DEFAULT_DURATION_MIN} 分钟。` });
         return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '🚫 已封禁用户', show_alert: false });
     }
 
@@ -838,7 +831,7 @@ async function handleCallback(cb, env) {
     const act = stateActions[action === 'unlock' ? 'lock' : (action === 'unban' ? 'ban' : null)];
     if (act) {
         if (action === 'lock' || action === 'ban') {
-            act.set(kv, owner, userId, 10);
+            act.set(kv, owner, userId, CONSTANTS.DEFAULT_DURATION_MIN);
         } else {
             act.del(kv, owner);
         }

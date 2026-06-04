@@ -235,7 +235,16 @@ async function sendSentConfirm(tg, chatId, target, targetName) {
 // 管理员命令处理
 const adminCmdHandlers = {
     '/lock': async (args, kv, owner, tg, chatId) => {
-        if (!args[1] || !/^-?\d+$/.test(args[1])) {
+        if (!args[1]) {
+            const users = await userCache.get(kv);
+            if (users.length) {
+                await tg('sendMessage', { chat_id: chatId, text: '请选择固定回复对象（第1页）', reply_markup: pageKeyboard(users, 1) });
+            } else {
+                await tg('sendMessage', { chat_id: chatId, text: '❌ 暂无最近联系人，请使用：/lock <用户数字ID> [分钟]' });
+            }
+            return;
+        }
+        if (!/^-?\d+$/.test(args[1])) {
             await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/lock <用户数字ID> [分钟]' });
             return;
         }
@@ -786,7 +795,8 @@ async function handleCallback(cb, env) {
         const userId = data.substring(4);
         stateActions.lock.set(kv, owner, userId, 10);
         await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
-        return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ 已选择该用户，现在可以直接发送消息给他（10分钟有效）', show_alert: false });
+        await tg('sendMessage', { chat_id: chatId, text: `✅ 已设置固定回复目标：${userId}，时长 10 分钟。` });
+        return tg('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ 已设置固定回复目标', show_alert: false });
     }
 
     const [action, userId] = data.split('_');

@@ -235,6 +235,10 @@ async function sendSentConfirm(tg, chatId, target, targetName) {
 // 管理员命令处理
 const adminCmdHandlers = {
     '/lock': async (args, kv, owner, tg, chatId) => {
+        if (!args[1] || !/^-?\d+$/.test(args[1])) {
+            await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/lock <用户数字ID> [分钟]' });
+            return;
+        }
         const mins = parseInt(args[2]) || 10;
         await kv.put(`reply_target:${owner}`, args[1]);
         await kv.put(`reply_target_expire:${owner}`, (Date.now() + mins * 60000).toString());
@@ -246,6 +250,10 @@ const adminCmdHandlers = {
         await tg('sendMessage', { chat_id: chatId, text: '🔓 已取消固定回复。' });
     },
     '/ban': async (args, kv, owner, tg, chatId) => {
+        if (!args[1] || !/^-?\d+$/.test(args[1])) {
+            await tg('sendMessage', { chat_id: chatId, text: '❌ 用法：/ban <用户数字ID> [分钟]' });
+            return;
+        }
         const mins = parseInt(args[2]) || 10;
         await kv.put(`ban:${owner}`, args[1]);
         await kv.put(`ban_expire:${owner}`, (Date.now() + mins * 60000).toString());
